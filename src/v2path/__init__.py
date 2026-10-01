@@ -5,3 +5,6 @@ from .errors import AssignmentError, Diagnostic, ParseError, StaleViewError
 __version__ = '0.1.0'
 __all__ = ['NULL', 'EncodingCharacters', 'Message', 'Segment', 'ValueState', 'parse',
            'AssignmentError', 'Diagnostic', 'ParseError', 'StaleViewError']
+from .structure import BoundaryContext, Grammar, Group, GroupRule, ResolvedMessage, SegmentView
+from . import presets
+__all__ += ['BoundaryContext', 'Grammar', 'Group', 'GroupRule', 'ResolvedMessage', 'SegmentView', 'presets']
