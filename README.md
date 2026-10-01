@@ -1,6 +1,6 @@
 # v2path
 
-A Python 3.11+ library for HL7 v2 parsing, editing, generation, and optional structural interpretation. No runtime dependencies. Version 0.1.0.
+A Python 3.11+ library for HL7 v2 parsing, editing, generation, and optional structural interpretation. No runtime dependencies. Version 0.2.0.
 
 Ordinary manipulation does not require an HL7 version or schema. Unchanged text and byte input retain their original representation. Unknown segments remain editable and serializable.
 
@@ -140,7 +140,7 @@ A callback returns one message, an iterable of messages, or `None` to filter it.
 | `output_encoding` | Explicit output character encoding |
 | `delimiters` | Explicit `EncodingCharacters` override for messages and envelopes |
 
-Generating envelopes requires `batch_header`, a complete BHS segment supplied by the caller. Optional `file_header` supplies FHS. BTS and FTS are generated from output counts. Business metadata is never invented. MLLP's final CR is independent of the ER7 terminator option. Framing support does not include a listener, ACK handling, or retries.
+Generating envelopes requires `batch_header`, a complete BHS segment supplied by the caller. Optional `file_header` supplies FHS. BTS and FTS are generated from output counts. Business metadata is never invented. MLLP's final CR is independent of the ER7 terminator option. For TCP listeners, ACKs, and delivery policies, use the optional-import network and service modules described below.
 
 ```python
 from io import BytesIO
@@ -162,7 +162,17 @@ Support covers ASCII, UTF-8, ISO-8859-1, and Windows-1252. Byte parsing chooses 
 
 `msg.to_bytes(encoding=...)` converts text and hex escapes and updates MSH-18. New values are encoded strictly, never replaced silently. Direct conflicting MSH-18 assignments are rejected. Source bytes that cannot be interpreted prevent an explicit charset conversion.
 
-Envelope records have no reliable charset declaration. Non-ASCII text envelopes or explicit conversion of non-ASCII byte envelopes require an explicit source encoding. Delimiter conversion updates message and envelope declarations, data, and matching trailers. Stateful encodings, UTF-16/UTF-32, sequence grammars, field-dependent boundaries, and full datatype/table validation are outside v0.1.
+Envelope records have no reliable charset declaration. Non-ASCII text envelopes or explicit conversion of non-ASCII byte envelopes require an explicit source encoding. Delimiter conversion updates message and envelope declarations, data, and matching trailers. Stateful encodings, UTF-16/UTF-32, sequence grammars, field-dependent boundaries, and full datatype/table validation are outside the current release.
+
+## Network and routed services
+
+Version 0.2 adds `v2path.ack`, `v2path.net`, and `v2path.service` in the same distribution. They use only the Python standard library. Imports start no sockets or event loops. See the [runtime guide](docs/runtime.md) for ACK policy, routing, file publication, limits, and recovery.
+
+Run the self-contained loopback example after installation:
+
+```sh
+python examples/mllp_route.py
+```
 
 ## Development
 
@@ -172,7 +182,7 @@ python -m pytest -q
 python -m build
 ```
 
-CI covers Python 3.11–3.14 on Linux and Python 3.11 on Windows. Tests cover preservation, values, views, group ranges, presets, framing/envelopes, chunk boundaries, and atomic output failure, with Hypothesis round-trip properties.
+CI covers Python 3.11–3.14 on Linux and Python 3.11 on Windows. Tests cover preservation, values, views, group ranges, presets, framing/envelopes, chunk boundaries, atomic output failure, live ACK combinations, persistent sockets, fanout, retries, directory chaining, failure replay, and resumable shutdown, with Hypothesis round-trip properties.
 
 The [design document](base%20design.md) records the agreed behavior and implementation decisions.
 

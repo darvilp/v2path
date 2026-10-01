@@ -1166,3 +1166,17 @@ The native vocabulary and five lightweight presets derive from CRS4 hl7apy's MIT
 The package has no runtime dependencies. Development uses pytest, Hypothesis, and the standard Python build frontend. Distributions include GPLv3 text, the version-3-or-later grant, and third-party notices. CI covers Python 3.11 through 3.14 on Linux and 3.11 on Windows.
 
 Detailed usage and current limits are documented in README.md. Network services, ACK handling, full standards validation, and package publication remain separate work.
+
+---
+
+# 20. Version 0.2 network and service layer
+
+The later-layer work identified in sections 18 and 19 is implemented in the same distribution as optional-import `v2path.ack`, `v2path.net`, `v2path.service`, and file endpoint support. Python 3.11+, GPL-3.0-or-later, and no runtime dependencies remain unchanged.
+
+The runtime contracts and defaults are recorded in [docs/runtime.md](docs/runtime.md). They include MLLP-only persistent TCP, original/enhanced ACK negotiation from MSH-15/16, communication admission ACKs by default, optional application completion, bounded memory queues, required fanout, opt-in retry by MSA/outcome, direct route handoff, file/directory sources and destinations, atomic no-clobber file publication, rotating batches, failure artifacts, and explicit replay.
+
+Communication ACKs acknowledge non-durable memory admission. Conditional silence remains unconfirmed. Application completion waits for all required destinations and forces file publication. Retries freeze bytes and preserve each destination's order. Internal handoffs default to queue acceptance; explicit completion handoffs wait for downstream output.
+
+Final directory output chooses batching or preserves finite input-file grouping; declared chained directories default to atomic message files. Preserved groups spool payload and member metadata to disk so a large file need not retain every per-message receipt in memory. Source archival remains contingent on final publication. Failure storage errors pause admission and retain pending work. Abandoned claims and incomplete artifacts require inspection rather than automatic replay.
+
+HTTP transport remains a later addition. No broker, config DSL, management server, or OS service installer is introduced.
