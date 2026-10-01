@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .core import Message, encoding_characters, normalize_encoding, parse, transcode_hex
 from .errors import ParseError
+from .framing import START, END
 
 
 @dataclass(frozen=True)
@@ -241,13 +242,14 @@ class MessageWriter:
     def write(self, msg: Message):
         if not isinstance(msg, Message):
             raise TypeError('write expects a Message')
+        payload = msg.to_bytes(encoding=self.encoding, terminator=self.terminator, delimiters=self.delimiters)
         framed = self.framing == 'mllp' or self.framing == 'preserve' and msg._framing and not self._frame
         if framed:
-            self._write(b'\x0b')
+            self._write(START)
             self._needs_separator = False
-        self._payload(msg.to_bytes(encoding=self.encoding, terminator=self.terminator, delimiters=self.delimiters))
+        self._payload(payload)
         if framed:
-            self._write(b'\x1c\r')
+            self._write(END)
             self._needs_separator = False
 
     def write_record(self, record, *, source_encoding=None):
@@ -255,12 +257,12 @@ class MessageWriter:
             self.write(record)
         elif isinstance(record, FrameStart):
             if self.framing == 'preserve':
-                self._write(b'\x0b')
+                self._write(START)
                 self._frame = True
                 self._needs_separator = False
         elif isinstance(record, FrameEnd):
             if self.framing == 'preserve':
-                self._write(b'\x1c\r')
+                self._write(END)
                 self._frame = False
                 self._needs_separator = False
         elif isinstance(record, Envelope):
