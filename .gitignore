@@ -1,2 +1,10 @@
 # Windows download metadata retained by WSL copies.
 *:Zone.Identifier
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.hypothesis/
+*.egg-info/
+build/
+dist/
