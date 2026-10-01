@@ -1,9 +1,10 @@
 # V2Path Design
 
-**Status:** Initial design snapshot  
-**Project:** `v2path`  
-**Primary language:** Python  
-**Primary use case:** HL7 v2 file-based parsing, transformation, and generation  
+**Status:** Reviewed design, ready for implementation planning\
+**Project:** `v2path`\
+**Primary language:** Python 3.11+\
+**License:** GPL-3.0-or-later\
+**Primary use case:** HL7 v2 file-based parsing, transformation, and generation\
 **Long-term direction:** Optional lightweight always-running interface runtime
 
 ## 1. Purpose
@@ -15,9 +16,11 @@ The desired experience is:
 - convenient and tolerant for ordinary message manipulation;
 - aware of repeating and nested message structure when structure matters;
 - usable without loading or satisfying a complete HL7 schema;
-- lossless enough to preserve unknown, vendor-specific, or structurally unusual content;
+- lossless for untouched source content, including unknown, vendor-specific, or structurally unusual segments;
 - particularly well suited to file-based conversions;
 - reusable later inside an always-running listener/router/transform/writer service.
+
+V2Path is a generic library, not a converter dedicated to one message type. A common workflow modifies a message while retaining its type, such as ADT to ADT. Examples and fixtures should prove behavior without restricting the library to those conversions.
 
 The central design problem is **structural association**.
 
@@ -60,6 +63,16 @@ Groups and anchor relationships are structural views over the original segments 
 
 Unknown and unresolved segments remain present and serializable.
 
+The default contract is **preserve what the caller did not change; normalize only on request**:
+
+- Untouched text input renders as identical text, including delimiters, escape spelling, trailing empty fields, and line endings.
+- Untouched byte input renders as identical bytes when retaining the original encoding and output format.
+- A targeted edit preserves source representation outside the affected portion.
+- Absent values, empty values, and HL7 explicit null (`""`) remain distinguishable in the model, even where convenient value access treats absent and empty alike.
+- Character encoding, delimiters, segment terminators, framing, and envelopes change only through explicit output choices or necessary consequences of an edit.
+
+For batch transformations, affected counts must reflect the resulting content rather than preserve stale values. Exact preservation does not justify incorrect metadata after an edit.
+
 ### Anchors handle the ordinary case
 
 Most transformation logic naturally thinks in relationships such as:
@@ -86,9 +99,19 @@ These rules describe structure without requiring complete datatype, table, or ca
 
 ### Standards knowledge is optional
 
-Standard HL7 structure definitions can eventually be supplied by the library, but they are helpers rather than prerequisites.
+Ordinary parsing, editing, serialization, and positional attachment are version-independent. They do not require selecting an HL7 version or satisfying a standard message definition.
 
-The library should remain useful against imperfect real-world HL7.
+HL7 2.5.1 supplies the initial vocabulary of recognized native segments and a reference for bundled structures. It is not an acceptance gate. Unfamiliar segments remain present and editable, and inaccurate or unsupported MSH version metadata does not prevent ordinary manipulation.
+
+Bundle lightweight structures for these initial common events:
+
+- `ADT^A01`: admit/visit notification;
+- `SIU^S12`: new appointment booking notification;
+- `ORM^O01`: general order message;
+- `ORU^R01`: unsolicited observation results;
+- `DFT^P03`: post detail financial transaction.
+
+These are optional interpretation aids, not claims of complete coverage of every event or version in those families. Full schema, datatype, and table validation remain separate concerns.
 
 ### File conversion comes first
 
@@ -131,10 +154,9 @@ EncodingCharacters
   repetition
   escape
   subcomponent
-  segment_terminator
 ```
 
-Encoding state belongs to each message and should be immutable.
+Delimiter and source-encoding state belongs to each message and should be immutable. Preserve source segment terminators separately, including mixed terminators and an absent final terminator; a single normalized terminator must not erase that information. Output overrides do not mutate the original parsing state.
 
 A reusable parser must not change the interpretation of previously parsed messages when it encounters a later MSH with different delimiters.
 
@@ -153,6 +175,12 @@ ResolvedMessage
 These objects reference the existing `Segment` instances.
 
 They do not duplicate the physical message.
+
+A grammar defines interpretation rules; a resolved view records their results for one message. Multiple views can coexist over the same raw message, for example default and vendor-specific interpretations.
+
+Group membership and attachment relationships belong to each view, not to shared raw segments. Relationship methods such as `parent()`, `children()`, and `group()` operate on view-bound segment references. The exact wrapper API remains an implementation detail.
+
+A field edit through any view changes the shared underlying segment, and other views see that value. Resolving a different interpretation does not change physical order or serialization. Independent transformed outputs require copying the message, not merely creating another view.
 
 For example:
 
@@ -193,139 +221,53 @@ while serialization still uses the original segment sequence.
 
 # 4. Anchor attachment
 
-Anchor attachment is V2Path's default structural mechanism.
+Anchor attachment is V2Path's default structural mechanism. The default NTE rule is positional, independent of whether that placement is valid in a standard message grammar:
 
-An **anchor** is a segment capable of owning or contextualizing following segments.
+> Attach NTE to the nearest preceding recognized native, non-NTE segment within the current structural scope.
 
-An attachment rule states that a segment should attach to the nearest preceding eligible anchor that remains active in its structural scope.
+Use the initial native-segment vocabulary described in section 2. Skip Z-segments and other unrecognized segments by default without removing or rewriting them. Consecutive NTEs share the same anchor rather than attaching to one another. Custom rules can explicitly recognize vendor segments as anchors.
 
-Conceptually:
+| Physical sequence | Default relationship |
+|---|---|
+| `OBR → OBX → ZXX → NTE` | NTE attaches to OBX. ZXX remains in place. |
+| `OBR → OBX → ORC → NTE → OBR` | NTE attaches to ORC. The later OBR does not change it. |
+| `OBR → OBX → NTE` | NTE attaches to OBX. |
+| `OBX → NTE → NTE` | Both NTEs attach to OBX. |
 
-```python
-attach("NTE").to_nearest(
-    "OBX",
-    "OBR",
-    "PID",
-    "PV1",
-    "SPM",
-)
-```
-
-Given:
-
-```text
-PID
-NTE
-NTE
-ORC
-OBR
-NTE
-OBX
-NTE
-NTE
-OBX
-NTE
-```
-
-the inferred relationships become:
-
-```text
-PID
-  NTE
-  NTE
-
-OBR
-  NTE
-
-OBX
-  NTE
-  NTE
-
-OBX
-  NTE
-```
-
-The NTE remains an ordinary physical segment. Attachment adds a structural relationship.
+All these relationships are deterministic and produce no attachment warning. Validating standard segment placement is a separate, explicit operation. Default attachment must not reject ORC as an anchor merely because a standard grammar would disallow an NTE there.
 
 ## Anchor scope
 
-The rule must **not** mean:
+Explicit groups constrain attachment. A search cannot reach backward into an earlier group. If no eligible anchor exists in the current scope, leave the NTE unattached and make that condition available as a diagnostic.
 
-> Find the nearest matching segment anywhere before this segment.
+Without a group grammar, the raw message is the scope. Each newly encountered eligible native segment replaces the current anchor. The default algorithm does not infer a complete order or patient hierarchy from this alone.
 
-Instead:
-
-> Find the nearest eligible anchor still active inside the current structural scope.
-
-For example:
-
-```text
-ORDER 1
-  OBR
-  OBX
-  NTE
-
-ORDER 2
-  OBR
-  NTE
-```
-
-The last NTE must not attach to the OBX from ORDER 1.
-
-Explicit groups therefore constrain anchor resolution when groups are available.
-
-## Context-stack implementation
-
-Internally, the resolver can maintain active contexts:
-
-```text
-read OBR
-    current order anchor = OBR
-
-read OBX
-    current observation anchor = OBX
-
-read NTE
-    attach -> current OBX
-
-read OBX
-    replace current observation anchor
-
-read NTE
-    attach -> new OBX
-```
-
-A context stack is an implementation technique rather than the user-facing abstraction.
-
-The initial implementation should favor a conceptually simple two-stage process:
+When groups are supplied, resolve their boundaries before resolving attachments within those scopes:
 
 ```text
 raw message
     ↓
-group resolution
+group resolution, when supplied
     ↓
-anchor resolution within group scopes
+anchor resolution within scopes
     ↓
 resolved message
 ```
 
-This can later be optimized into a single pass if profiling shows a meaningful reason.
+The implementation can use a context stack for nested groups. Optimization into a single pass is unnecessary unless profiling justifies it.
 
 ## Anchor API
 
-Anchor relationships should be directly accessible.
-
-Possible API:
+Relationships are accessible through view-bound segment references. Illustrative API:
 
 ```python
-obx.children("NTE")
-obr.children("NTE")
-
-nte.parent()
-segment.attachments()
+resolved = msg.resolve()
+obx = resolved.segment("OBX")
+notes = obx.children("NTE")
+notes[0].parent()
 ```
 
-Relative physical navigation should also be available:
+Physical navigation remains available separately, without requiring a path expression:
 
 ```python
 obx.next("NTE")
@@ -333,7 +275,7 @@ obr.until("OBX")
 segment.previous("ORC")
 ```
 
-These operations should not require callers to write a path expression.
+A physical neighbor and an attached child are distinct concepts, particularly when Z-segments occur between an anchor and its NTEs.
 
 ---
 
@@ -343,38 +285,22 @@ Anchors intentionally do not solve every structure.
 
 V2Path therefore supports explicit nested and repeating groups.
 
-A simple rule might look like:
+The first release uses boundary rules, not a sequence grammar:
 
 ```python
-group(
-    "ORDER",
-    start="ORC",
-    repeat=True,
-)
+from v2path import Grammar, GroupRule
 
-group(
-    "OBSERVATION",
-    start="OBX",
-    parent="ORDER",
-    repeat=True,
-)
+rules = Grammar((
+    GroupRule("ORDER", "ORC", children=(
+        GroupRule("OBSERVATION", "OBX"),
+    )),
+))
+resolved = msg.resolve(rules)
 ```
 
-A more complex structure could use a sequence grammar:
+`start` accepts a segment name, tuple of names, or a boundary predicate receiving the incoming segment and current group context. `end_before` closes a group before specified segment types. Repeated starts open sibling groups, and parent closure closes its descendants.
 
-```python
-group("ORDER", [
-    optional("ORC"),
-    required("OBR"),
-
-    many(
-        group("OBSERVATION", [
-            required("OBX"),
-            many("NTE"),
-        ])
-    ),
-])
-```
+Boundary predicates in the first release depend only on segment identifiers and group membership. Field-dependent rules and an `optional`/`required`/`many` sequence language remain later work.
 
 This grammar describes **message structure only**.
 
@@ -548,7 +474,7 @@ Here:
 
 The angle-bracket notation is descriptive output, not canonical path syntax.
 
-Useful API properties could include:
+Useful API properties on resolved groups and view-bound segments could include:
 
 ```python
 group.name
@@ -558,14 +484,14 @@ group.segment_types()
 
 segment.group()
 
-msg.groups()
-msg.structure()
+resolved.groups()
+resolved.structure()
 ```
 
 For example:
 
 ```python
-print(msg.structure())
+print(resolved.structure())
 ```
 
 might produce:
@@ -592,13 +518,13 @@ The documentation should repeatedly reinforce one rule:
 V2Path should probably **not** silently interpret:
 
 ```python
-msg.group("PID")
+resolved.group("PID")
 ```
 
 as:
 
 ```python
-msg.group("PATIENT")
+resolved.group("PATIENT")
 ```
 
 That becomes ambiguous as structures become more complicated.
@@ -606,7 +532,7 @@ That becomes ambiguous as structures become more complicated.
 Instead, the relationship should be discoverable:
 
 ```python
-msg.groups_containing("PID")
+resolved.groups_containing("PID")
 ```
 
 or:
@@ -633,6 +559,10 @@ Simple manipulation should remain simple:
 msg["PID-3.1"]
 segment["5.1"]
 ```
+
+Singular access takes the first match in physical order within the relevant scope. `msg["PID-3.1"]` uses the first physical PID. A singular group or segment lookup within a resolved group takes its first matching member. Multiple matches do not produce a warning; callers use plural access or explicit occurrences when needed.
+
+For a present segment, convenient value access returns `""` for either an absent or empty field value. Explicit HL7 null reads as the exported `NULL` singleton. A separate presence/state API distinguishes absent, empty, and explicit HL7 null. Reading an absent field must not create it or change serialization. A missing segment or group remains distinguishable from a present segment with an empty field; singular object lookup returns `None`, while a field path through a missing object raises `LookupError`.
 
 ## Flat occurrence access
 
@@ -665,7 +595,7 @@ Indexes are relative to the containing structural scope.
 Equivalent object navigation might be:
 
 ```python
-msg.group("ORDER", 1) \
+resolved.group("ORDER", 1) \
    .group("OBSERVATION", 2) \
    .segment("OBX")
 ```
@@ -717,7 +647,7 @@ Only ER7 parsing occurs.
 resolved = msg.resolve()
 ```
 
-Applies V2Path's lightweight default anchor behavior and any appropriate default structural information.
+Applies the positional NTE attachment rule using the native-segment vocabulary. No declared HL7 version or complete schema is required. Optional group grammars constrain scope when selected; they must not silently replace the default attachment rule with standard placement validation.
 
 ## Explicit/custom resolution
 
@@ -731,13 +661,13 @@ Adds caller-supplied groups and attachment rules.
 
 ## Standards-informed resolution
 
-Later:
+Bundled common-event grammars are available as optional interpretations. A future convenience API such as:
 
 ```python
 resolved = msg.resolve_standard()
 ```
 
-may select a known structure using MSH version/message/event metadata.
+may select a known structure using MSH message/event metadata, with version metadata only as a hint. Ordinary parsing and manipulation remain available when no bundled structure matches.
 
 Failure to resolve against a standard must never imply that the original message cannot be parsed.
 
@@ -755,34 +685,19 @@ Recoverable irregularities should preserve the source content and produce diagno
 
 ## Structural diagnostics
 
-Resolution could produce conditions such as:
-
-```text
-unattached NTE
-
-ambiguous group boundary
-
-unexpected segment inside ORDER
-
-missing expected OBR
-
-unknown segment ZXY
-```
-
-These should normally be available as:
+Diagnostics are collected for caller inspection, for example:
 
 ```python
 resolved.diagnostics
 ```
 
-rather than immediately terminating processing.
+Do not automatically print, log, or emit Python warnings. Record a structural issue at its source rather than repeating it for every downstream segment.
 
-Callers can decide whether to:
+Useful resolution diagnostics include an unattached NTE with no eligible anchor in scope, or an ambiguous group boundary under the selected grammar. Unknown Z-segments, skipped vendor segments, first-match singular access, custom grammars, and the default attachment examples in section 4 are not warnings by themselves.
 
-- ignore them;
-- log them;
-- reject selected conditions;
-- invoke stricter validation.
+An unfamiliar message is not necessarily ambiguous. Do not flag an otherwise deterministic positional attachment merely because a standard profile would reject the placement. Missing required elements or disallowed placements belong to explicit validation unless they prevent the selected grammar from resolving a boundary.
+
+Callers decide whether to ignore diagnostics, log them, reject selected conditions, or request validation.
 
 ## Validation
 
@@ -834,9 +749,9 @@ Explicit group rules may impose more specific placement requirements.
 
 ## Structural invalidation
 
-Changing field values normally does not affect grouping.
+Ordinary field-value edits leave views valid when the selected grammar does not depend on those values. If a grammar uses field values to resolve structure, changing those inputs also makes the affected view stale.
 
-Topology changes may:
+The following topology changes make all existing structural views of the message stale:
 
 ```text
 insert segment
@@ -845,7 +760,7 @@ move segment
 change segment type
 ```
 
-V2Path may invalidate the affected structural indexes and lazily re-resolve them.
+Stale views must not continue returning old relationships or silently re-resolve. Callers explicitly resolve the message again before further structural navigation. Raw segment values and physical serialization remain available independently of resolution. Structural access raises `StaleViewError` until the caller obtains a new view with `msg.resolve(...)`.
 
 Unknown segments and original ordering should otherwise remain untouched.
 
@@ -870,18 +785,31 @@ with MessageWriter(output_path) as output:
         output.write(convert(msg))
 ```
 
-The I/O layer should eventually understand:
+The first release includes support for:
 
 - one ER7 message per file;
 - multiple concatenated MSH messages;
-- FHS/BHS/BTS/FTS envelopes;
+- MLLP framing without requiring a network listener;
+- BHS/BTS batch envelopes and FHS/FTS file envelopes;
 - file-like streams;
 - iterables;
 - large inputs without loading everything into memory.
 
 Batch/file envelope information should be preservable without forcing callers interested only in individual messages to manipulate envelopes directly.
 
-HL7 escaping, source encoding, MSH-18, delimiters, and segment terminators should receive explicit handling rather than being accidental parser behavior.
+HL7 escaping, source encoding, MSH-18, delimiters, and segment terminators receive explicit handling rather than being accidental parser behavior.
+
+Output defaults to preserving the input representation. Provide separate, composable options for:
+
+| Option | Choices |
+|---|---|
+| Segment terminator | Preserve original, CR, LF, or CRLF |
+| Transport framing | Preserve original, bare/unframed, or MLLP |
+| Batch/file envelopes | Preserve original, omit explicitly, or generate BHS/BTS with optional FHS/FTS |
+
+MLLP framing uses its own start/end markers and final CR; changing an ER7 segment terminator must not rewrite those framing bytes. Framing support is byte/file processing, not listener lifecycle or ACK handling.
+
+Preserve envelope metadata by default and update affected counts when transformations change their contents. Details for constructing new envelope metadata and writing mixed-format sources remain to be specified. Explicit normalization and encoding conversion may change representation; the default writer must not normalize incidentally.
 
 ---
 
@@ -905,7 +833,7 @@ def convert(msg):
 
 V2Path should not require a transformation DSL.
 
-A transformation should eventually be able to produce:
+The first release supports transformations producing:
 
 ```text
 one message
@@ -913,7 +841,7 @@ multiple messages
 no message
 ```
 
-This supports filtering, splitting, and aggregation during file conversions.
+This supports filtering and splitting during file conversions. Aggregation requires state across input messages and is a separate transformation concern.
 
 ---
 
@@ -949,7 +877,7 @@ v2path/
   escape.py
 ```
 
-Optional standard grammars could later live under:
+Optional bundled structure grammars can live under:
 
 ```text
 v2path/standards/
@@ -1032,11 +960,17 @@ It should not retain a flat-only structural model for compatibility.
 
 A greenfield implementation with selective compatibility appears cleaner than trying to retrofit all structural semantics into the existing model.
 
-If source code is directly adapted from `hl7lw`, the previously identified Apache-2.0 attribution and notice requirements apply.
+V2Path targets Python 3.11 and newer and uses **GNU GPL version 3 or later**, with SPDX identifier `GPL-3.0-or-later`.
+
+The repository should carry the standard GPLv3 license text and an explicit version-3-or-later grant. The license permits private use and modification, but distribution of covered derivatives or combined applications carries GPL source and licensing obligations. Network use alone does not impose the AGPL network-source requirement.
+
+If third-party source is adapted, verify its license and retain all required attribution and notices. For Apache-2.0 material, its applicable attribution and notice obligations remain relevant; they do not make Apache-2.0 V2Path's project license.
 
 ---
 
 # 16. Development milestones
+
+These are implementation stages, not separate release promises. The first release includes the agreed output formats and common bundled grammars as well as the core. The detailed implementation plan remains a separate step.
 
 ## Milestone 1: Lossless ER7 core
 
@@ -1055,9 +989,9 @@ Implement:
 Implement:
 
 - declarative anchor rules;
-- nearest-active-anchor resolution;
-- parent/child access;
-- attachment diagnostics;
+- nearest preceding native non-NTE attachment, skipping unrecognized segments;
+- view-bound parent/child access;
+- quiet attachment diagnostics;
 - insertion/removal of attached segments.
 
 The primary fixtures should exercise NTE after:
@@ -1065,12 +999,13 @@ The primary fixtures should exercise NTE after:
 ```text
 PID
 PV1
+ORC
 OBR
 OBX
 SPM
 ```
 
-and combinations of those in a single message.
+and combinations of those in a single message, including all deterministic examples in section 4. Group boundary isolation becomes mandatory when groups are introduced in milestone 3.
 
 This is the first milestone that materially establishes V2Path's niche.
 
@@ -1085,7 +1020,8 @@ Implement:
 - anchor scoping by group;
 - structural paths;
 - group introspection;
-- custom grammars.
+- custom grammars;
+- multiple simultaneous views and explicit re-resolution after structural edits.
 
 This milestone should also validate whether names such as:
 
@@ -1106,16 +1042,15 @@ Add:
 - file envelopes;
 - streaming;
 - multiple output messages;
-- stronger charset handling.
+- source-byte preservation and explicit charset conversion;
+- preserve/CR/LF/CRLF terminator options;
+- MLLP framing independently of batch/file envelopes.
 
-## Milestone 5: Optional standards support
+## Milestone 5: Bundled interpretation helpers
 
-Add:
+Include the optional lightweight structures for ADT A01, SIU S12, ORM O01, ORU R01, and DFT P03. Use 2.5.1 as the initial reference rather than a required caller setting or acceptance gate. The native-segment vocabulary must already be available for milestone 2.
 
-- bundled standard structure grammars;
-- automatic message/version selection;
-- structural validation;
-- custom profile extension.
+Full standards coverage, automatic grammar selection, expanded structural validation, and profile extension can follow separately. They must not become prerequisites for ordinary manipulation.
 
 ## Later: Interface runtime
 
@@ -1150,7 +1085,18 @@ Core fixtures should include:
 - parse/render round-trip preservation;
 - mutation followed by structural re-resolution;
 - large streamed message files;
-- custom vendor grammars overriding default attachment behavior.
+- custom vendor grammars overriding default attachment behavior;
+- all four NTE attachment examples in section 4, without warnings;
+- no cross-group attachment and no eligible anchor within a scope;
+- simultaneous views with independent relationships and shared field values;
+- rejection of stale structural navigation until explicit re-resolution;
+- first-match access and separate absent, empty, and explicit-null states;
+- no-op text and byte round trips, mixed terminators, escapes, and trailing empties;
+- targeted edits preserving unrelated source representation;
+- CR/LF/CRLF output, MLLP framing, and batch/file envelope preservation;
+- envelope counts after filtering or splitting;
+- ordinary manipulation with inaccurate or unsupported version metadata;
+- bundled common-event interpretations without mandatory schema validation.
 
 Property-based tests are particularly useful for parser/render invariants.
 
@@ -1158,97 +1104,65 @@ Property-based tests are particularly useful for parser/render invariants.
 
 # 18. Current design decisions
 
-The project currently assumes:
-
-1. V2Path is primarily a lightweight HL7 v2 transformation library.
-2. Raw parsing and structural resolution are separate layers.
-3. Anchor attachment is the default structural mechanism.
-4. Explicit grouping supplements anchors for complicated structures.
-5. Groups constrain anchor scope rather than replacing anchors.
-6. Raw physical segment ordering remains authoritative.
-7. Segments and semantic groups are distinct concepts.
-8. Semantic group names such as `PATIENT`, `ORDER`, and `OBSERVATION` are preferred over segment-code group names.
-9. The API compensates for semantic-name opacity with strong introspection and representations such as `PATIENT<PID>`.
-10. Relative anchor operations and full structural paths coexist.
-11. File and stream conversions are first-class near-term features.
-12. Standards/schema support is optional.
-13. The eventual listener/router/transform/writer service is a separate later layer.
+1. V2Path is a generic HL7 v2 transformation library, with same-type message edits as a common use case.
+2. Python 3.11 is the minimum supported version; the project license is GPL-3.0-or-later.
+3. Raw parsing and structural interpretation are separate, and ordinary manipulation is version-independent.
+4. Preserve original representation by default, including untouched text or bytes and unknown segments. Normalize only when explicitly requested.
+5. NTE attaches to the nearest preceding recognized native non-NTE segment in scope. Skip Z-segments by default; custom rules can make them anchors.
+6. Consecutive NTEs share their anchor. Deterministic positional attachments are not warnings or assertions of standard validity.
+7. Explicit groups constrain attachment. Never reach into an earlier group; leave NTE unattached when no eligible anchor exists in scope.
+8. Physical segment ordering remains authoritative. Semantic groups and physical segments are distinct concepts.
+9. Multiple resolved views share raw segments but own their relationships. Independent output variants require copying the message.
+10. Structural edits make existing views stale and require explicit re-resolution. Field changes also invalidate interpretations that depend on those values.
+11. Singular access takes the first match in scope without warning. Plural and explicit occurrence access remain available.
+12. Convenient value access treats absent and empty fields as `""`, while a state API distinguishes absence, emptiness, and explicit HL7 null. Missing segments/groups remain distinct.
+13. Diagnostics are available for inspection without automatic logging, printing, or Python warnings. Validation is explicit.
+14. HL7 2.5.1 seeds the native-segment vocabulary and reference structures, not an acceptance gate.
+15. Bundle optional lightweight interpretations for ADT A01, SIU S12, ORM O01, ORU R01, and DFT P03.
+16. The first release includes explicit CR/LF/CRLF output, MLLP framing, and BHS/BTS plus FHS/FTS envelope support. Preserve source formats by default.
+17. Semantic group names, introspection, physical navigation, and structural paths coexist.
+18. Networking, ACK handling, and a persistent interface runtime remain a separate later layer.
 
 ---
 
-# 19. Remaining design questions
+# 19. First-release implementation contracts
 
-The core architecture is reasonably settled, but implementation planning should resolve several details.
+### Values and addressing
 
-### Grammar syntax
+- Fields, components, subcomponents, and repetitions are one-based. Segment/group occurrences and Python lists are zero-based.
+- `PID[1]-3[2].1` selects the second PID, second repetition of field 3, component 1.
+- Ordinary reads decode supported escapes. Explicit raw access preserves ER7 spelling.
+- Ordinary assignment interprets separators below its target level. A field accepts repetitions/components/subcomponents; a component accepts subcomponents. Unescaped higher-level separators raise `AssignmentError` atomically.
+- `set_text(...)` escapes delimiters as literal text. Explicit HL7 null uses the exported `NULL` value.
+- Missing singular segment/group lookups return `None`; paths through them raise `LookupError`. Missing fields inside present segments read as `""` without materializing fields.
+- Plural group and segment lookups inspect direct members by default; `recursive=True` searches descendants. Structural paths always traverse direct scopes.
 
-Determine the cleanest declarative syntax for:
+### Views and mutation
 
-- anchors;
-- group boundaries;
-- repetition;
-- group nesting;
-- explicit overrides.
+`GroupRule` and `Grammar` provide the boundary API. Standard sequence validation is not part of it. Conflicting static rules are rejected; unresolved runtime boundaries retain physical content with a quiet diagnostic.
 
-### Built-in grammar depth
+Topology changes invalidate all views. Raw values remain usable, while relationship and group navigation raises `StaleViewError` until explicitly resolved again.
 
-Decide how much V2Path should understand by default.
+Adding NTE places it after the anchor's last attached NTE, or directly after the anchor when none exists. Group movement includes all physical content in its contiguous range, including unknown segments. Cross-message movement is rejected; independent outputs use message copies.
 
-Possible spectrum:
+New segments use the preceding terminator style, then a following existing style, then CR. The writer adds a missing separator only when a following record requires it. An untouched standalone unterminated message stays unterminated.
 
-```text
-generic anchor rules only
-        ↓
-common lightweight structural rules
-        ↓
-full per-message HL7 group definitions
-```
+### I/O and encoding
 
-The likely answer is the middle option with optional full definitions.
+`parse` handles one bare message; `iter_records`, `iter_messages`, `MessageWriter`, and `transform_stream` handle file/stream workflows. Message-only iteration does not reproduce file envelopes; use record iteration or `transform_stream` for preservation of complete files.
 
-### Group naming
+Callbacks return one message, an iterable of messages, or `None`. Path destinations are replaced atomically after success; caller-owned output streams can contain partial output after failure. Input is processed incrementally with at most one message and a physical record/read chunk buffered.
 
-Semantic names are the current recommendation.
+Initial byte support covers ASCII, UTF-8, ISO-8859-1, and Windows-1252. Explicit input encoding takes precedence over recognized MSH-18; absent metadata falls back to UTF-8 with reversible preservation of undecodable bytes. Unsupported declared encodings require an override. New values encode strictly. Explicit charset conversion updates hex escapes and MSH-18 and fails when undecodable source data cannot be converted safely.
 
-The first prototype should specifically evaluate whether code such as:
+Delimiter declarations and conflicting charset metadata cannot be changed through ordinary setters. Use explicit output conversion. Opaque escapes that cannot be safely converted cause an error rather than a guess. Explicit delimiter conversion updates message and envelope declarations, data, and matching trailers.
 
-```python
-msg.group("PATIENT")
-msg.group("ORDER")
-msg.groups("OBSERVATION")
-```
+Generated BHS and optional FHS headers require caller-supplied metadata. Trailers use actual output counts. Existing envelopes and empty batches are retained by default; affected message counts update after filtering/splitting. Non-ASCII text envelopes and transcoding of non-ASCII byte envelopes require an explicit source encoding.
 
-feels natural after short exposure.
+### Reference data, packaging, and verification
 
-If it does, retain it.
+The native vocabulary and five lightweight presets derive from CRS4 hl7apy's MIT-licensed 2.5.1 data, pinned to revision `a679a01c6b6358242e8d3682868c36ff5134a294`. Retain its notice and provenance. No hl7apy runtime dependency or full datatype/table model is introduced.
 
-If it proves too opaque, improve discoverability before considering segment-code aliases. The distinction between a semantic container and its physical anchor segment should remain intact regardless of syntax.
+The package has no runtime dependencies. Development uses pytest, Hypothesis, and the standard Python build frontend. Distributions include GPLv3 text, the version-3-or-later grant, and third-party notices. CI covers Python 3.11 through 3.14 on Linux and 3.11 on Windows.
 
-### Mutation placement
-
-Define deterministic rules for inserting:
-
-- attached children;
-- new anchors;
-- new groups;
-- unknown/custom segments.
-
-### Resolution lifecycle
-
-Decide whether:
-
-```python
-msg.resolve()
-```
-
-returns a persistent view, caches indexes on the message, or both.
-
-### Standard definitions
-
-Decide whether standard structural grammars are:
-
-- hand-maintained;
-- generated from machine-readable HL7 definitions;
-- a combination of generated definitions plus curated overrides.
-
-These questions can be resolved incrementally without changing V2Path's central architecture.
+Detailed usage and current limits are documented in README.md. Network services, ACK handling, full standards validation, and package publication remain separate work.
