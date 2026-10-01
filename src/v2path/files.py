@@ -108,7 +108,7 @@ class FailureStore:
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
 
-    def write(self, metadata, payload, *, members=None, identity=None):
+    def write(self, metadata, payload, *, members=None, identity=None, request_body=None):
         identity = identity or uuid4().hex
         final = self.path / identity
         if final.exists():
@@ -121,6 +121,8 @@ class FailureStore:
                 shutil.copyfile(payload, data)
             else:
                 data.write_bytes(payload)
+            if request_body is not None:
+                (temporary / 'request.body').write_bytes(request_body)
             if members:
                 shutil.copyfile(members, temporary / 'members.jsonl')
             record = dict(metadata, id=identity, recorded_at=utcnow())

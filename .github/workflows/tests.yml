@@ -23,4 +23,5 @@ jobs:
       - run: python -m pip install '.[dev]'
       - run: python -m pytest -q -W error
       - run: python examples/mllp_route.py
+      - run: python examples/http_route.py
       - run: python -m build

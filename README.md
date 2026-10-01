@@ -1,6 +1,6 @@
 # v2path
 
-A Python 3.11+ library for HL7 v2 parsing, editing, generation, and optional structural interpretation. No runtime dependencies. Version 0.2.0.
+A Python 3.11+ library for HL7 v2 parsing, editing, generation, and optional structural interpretation. No runtime dependencies. Version 0.3.0.
 
 Ordinary manipulation does not require an HL7 version or schema. Unchanged text and byte input retain their original representation. Unknown segments remain editable and serializable.
 
@@ -166,13 +166,15 @@ Envelope records have no reliable charset declaration. Non-ASCII text envelopes 
 
 ## Network and routed services
 
-Version 0.2 adds `v2path.ack`, `v2path.net`, and `v2path.service` in the same distribution. They use only the Python standard library. Imports start no sockets or event loops. See the [runtime guide](docs/runtime.md) for ACK policy, routing, file publication, limits, and recovery.
+Version 0.2 added `v2path.ack`, `v2path.net`, and `v2path.service` in the same distribution. They use only the Python standard library. Imports start no sockets or event loops. See the [runtime guide](docs/runtime.md) for ACK policy, routing, file publication, limits, and recovery.
 
 Run the self-contained loopback example after installation:
 
 ```sh
 python examples/mllp_route.py
 ```
+
+Version 0.3 adds outbound HTTP/HTTPS with custom body encoding, fresh per-attempt headers, optional HL7 ACK evaluation, and exact-body replay. See the [HTTP guide](docs/http.md) or run `python examples/http_route.py`.
 
 ## Development
 

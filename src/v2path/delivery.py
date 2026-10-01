@@ -4,12 +4,20 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class HTTPResponse:
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     outcome: str
     code: str | None = None
     detail: str = ''
     attempts: int = 1
     acknowledgements: tuple[bytes, ...] = ()
+    http_response: HTTPResponse | None = None
 
     @property
     def success(self):
@@ -33,4 +41,5 @@ class RetryPolicy:
     def for_result(self, result):
         if result.success:
             return Retry()
-        return self.rules.get(result.code, self.rules.get(result.outcome, Retry()))
+        http_key = f'http:{result.http_response.status}' if result.http_response else None
+        return self.rules.get(result.code, self.rules.get(http_key, self.rules.get(result.outcome, Retry())))

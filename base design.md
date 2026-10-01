@@ -1180,3 +1180,10 @@ Communication ACKs acknowledge non-durable memory admission. Conditional silence
 Final directory output chooses batching or preserves finite input-file grouping; declared chained directories default to atomic message files. Preserved groups spool payload and member metadata to disk so a large file need not retain every per-message receipt in memory. Source archival remains contingent on final publication. Failure storage errors pause admission and retain pending work. Abandoned claims and incomplete artifacts require inspection rather than automatic replay.
 
 HTTP transport remains a later addition. No broker, config DSL, management server, or OS service installer is introduced.
+
+
+# 21. Version 0.3 outbound HTTP
+
+Outbound HTTP/HTTPS now uses the same distribution and route runtime. The [HTTP guide](docs/http.md) specifies a standalone client, HTTP route destinations, frozen raw/custom-encoded request bodies, per-attempt header providers, status/HL7-ACK/custom response policies, opt-in retries, and exact-body failure replay. Authentication token acquisition remains application-owned.
+
+The implementation uses stdlib HTTP/1.1 with bounded worker-thread operations, one outstanding request per client, verified TLS by default, and explicit socket ownership through cancellation. DNS resolver calls remain non-interruptible; the worker must finish before its connection slot is released. Incoming HTTP and OAuth token management remain deferred.

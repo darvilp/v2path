@@ -18,6 +18,7 @@ from .core import Message, parse
 from .delivery import DeliveryResult, RetryPolicy
 from .files import (DirectoryDestination, DirectorySource, FailureStore, FileDestination,
                     FileSource, Spool, filename, publish, utcnow)
+from .http import HTTPClient, HTTPDestination, HTTPRequest, response_record
 from .io import iter_messages
 from .net import Acceptance, AdmissionRejected, MLLPClient, MLLPServer
 
@@ -94,6 +95,7 @@ class _Delivery:
     metadata: dict
     force: bool
     group: str | None
+    request: HTTPRequest | None = None
 
 
 @dataclass
@@ -112,9 +114,13 @@ def _aggregate(results):
 
 
 def _result_data(result):
-    return dict(outcome=result.outcome, code=result.code, detail=result.detail,
+    data = dict(outcome=result.outcome, code=result.code, detail=result.detail,
                 attempts=result.attempts,
-                acknowledgements=[base64.b64encode(a).decode('ascii') for a in result.acknowledgements])
+                acknowledgements=[base64.b64encode(a).decode('ascii') for a in
+                                 (() if result.http_response is not None else result.acknowledgements)])
+    if result.http_response is not None:
+        data['http_response'] = response_record(result.http_response)
+    return data
 
 
 class _Destination:
@@ -126,6 +132,9 @@ class _Destination:
         self.group_results = {}
         self.sequence = 0
         self.client = MLLPClient(endpoint.host, endpoint.port, **endpoint.options) if isinstance(endpoint, MLLPDestination) else None
+        if isinstance(endpoint, HTTPDestination):
+            self.client = HTTPClient(endpoint.url, method=endpoint.method, headers=endpoint.headers,
+                encoder=endpoint.encoder, header_provider=endpoint.header_provider, response=endpoint.response, **endpoint.options)
         self.task = None
 
     def mode(self, group):
@@ -173,18 +182,26 @@ class _Destination:
                 else:
                     result = await self._send(job)
                     if not result.success and result.outcome != 'downstream_failure':
-                        await self.service._failure(job.metadata, job.payload, result)
+                        await self.service._failure(job.metadata, job.payload, result, request=job.request)
                     job.future.set_result(result)
             except Exception as exc:
                 result = DeliveryResult('delivery_error', detail=type(exc).__name__ + ': ' + str(exc))
                 if isinstance(job, _Delivery):
-                    await self.service._failure(job.metadata, job.payload, result)
+                    await self.service._failure(job.metadata, job.payload, result, request=job.request)
                 if not job.future.done():
                     job.future.set_result(result)
             finally:
                 self.queue.task_done()
 
     async def _send(self, job):
+        if isinstance(self.client, HTTPClient):
+            if job.request is None:
+                try:
+                    job.request = await self.client.prepare(parse(job.payload, encoding=job.metadata.get('encoding')))
+                except Exception as exc:
+                    return DeliveryResult('request_error', detail=type(exc).__name__)
+            policy = self.route.retry if self.route.retry.rules else self.client.retry
+            return await self.client.send_prepared(job.request, retry=policy)
         attempt = 0
         while True:
             attempt += 1
@@ -347,9 +364,9 @@ class Service:
                     if dest.route not in self.routes or not self.routes[dest.route].allow_internal:
                         raise ValueError('Destination route is missing or rejects internal handoff')
                     graph[route.name].add(dest.route)
-                elif isinstance(dest, MLLPDestination) and dest.options.get('retry') and route.retry.rules:
-                    raise ValueError('Configure retry on the route or MLLP client, not both')
-                elif not isinstance(dest, MLLPDestination):
+                elif isinstance(dest, (MLLPDestination, HTTPDestination)) and dest.options.get('retry') and route.retry.rules:
+                    raise ValueError('Configure retry on the route or transport client, not both')
+                elif not isinstance(dest, (MLLPDestination, HTTPDestination)):
                     raise TypeError('Unsupported destination')
         directory_sources = {Path(r.source.path).resolve(): r for r in self.routes.values()
                              if isinstance(r.source, DirectorySource)}
@@ -416,17 +433,23 @@ class Service:
         self.errors.append(exc)
         del self.errors[:-128]
 
-    async def _failure(self, metadata, payload, result, *, members=None):
+    async def _failure(self, metadata, payload, result, *, members=None, request=None):
         replay_of = metadata.get('replay_of')
         if replay_of:
             # Keep one actionable record per failed delivery across replay attempts.
             # The payload remains the original frozen output.
             return self.failed_directory / replay_of
+        metadata = dict(metadata)
+        if request is not None:
+            metadata.update(kind='http', http_request=dict(url=request.url, method=request.method, encoding=request.encoding))
+        elif metadata.get('route') in self.routes and isinstance(
+                self.routes[metadata['route']].destinations.get(metadata.get('destination')), HTTPDestination):
+            metadata['kind'] = 'http_prepare'
         identity = uuid4().hex
         while True:
             try:
                 return self.failures.write(dict(metadata, **_result_data(result)), payload,
-                                           members=members, identity=identity)
+                                           members=members, identity=identity, request_body=request.body if request is not None else None)
             except OSError as exc:
                 self._paused = True
                 self._resume.clear()
@@ -723,6 +746,16 @@ class Service:
                 result = DeliveryResult('published')
             finally:
                 Path(tmp).unlink(missing_ok=True)
+        elif kind == 'http':
+            destination = self._states[record['route']].destinations[record['destination']]
+            target = record['http_request']
+            if not isinstance(destination.client, HTTPClient) or (target['url'], target['method']) != (destination.client.url, destination.client.method):
+                raise ValueError('HTTP replay target/method no longer matches configuration')
+            payload = (record_path / 'payload.hl7').read_bytes()
+            request = HTTPRequest(target['url'], target['method'], (record_path / 'request.body').read_bytes(), payload, target['encoding'])
+            future = _future()
+            await destination.queue.put(_Delivery(payload, future, dict(record, replay_of=identity), True, None, request))
+            result = await asyncio.shield(future)
         elif kind == 'message':
             state = self._states[record['route']]
             future = _future()
