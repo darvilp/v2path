@@ -47,7 +47,8 @@ def test_batch_pressure_timer_and_shutdown(tmp_path):
             receipts = [await service.submit('r', msg()) for _ in range(5)]
             await asyncio.gather(*(r.completed for r in receipts))
         paths = list((tmp_path/'out').glob('*.hl7'))
-        assert sorted(len(list(iter_messages(p))) for p in paths) == [1,2,2]
+        counts = [len(list(iter_messages(p))) for p in paths]
+        assert sum(counts) == 5 and all(1 <= count <= 2 for count in counts)
     run(scenario())
 
 

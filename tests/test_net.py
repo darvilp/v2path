@@ -186,10 +186,16 @@ def test_server_shutdown_during_accept_and_with_persistent_peer():
         reader, writer = await asyncio.open_connection(*server.address[:2])
         try:
             await asyncio.wait_for(server.close(), .5)
-            assert await reader.read() == b''
+            try:
+                assert await reader.read() == b''
+            except ConnectionResetError:
+                pass  # Closing a socket still being admitted may reset the peer.
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                pass
     asyncio.run(persistent())
 
 
